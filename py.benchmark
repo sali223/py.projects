@@ -1,0 +1,384 @@
+import time
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from typing import List, Dict, Any, Callable, Optional, Tuple
+import json
+import os
+from datetime import datetime
+
+
+class AIBenchmark:
+    """
+    A framework for benchmarking AI models on various tasks and metrics.
+    """
+    
+    def __init__(self, name: str = "AI Benchmark"):
+        """Initialize the benchmark framework."""
+        self.name = name
+        self.models = {}
+        self.tasks = {}
+        self.results = {}
+        self.timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        
+    def register_model(self, model_id: str, model_instance: Any, model_info: Dict = None):
+        """Register an AI model for benchmarking."""
+        self.models[model_id] = {
+            "instance": model_instance,
+            "info": model_info or {}
+        }
+        if model_id not in self.results:
+            self.results[model_id] = {}
+        
+    def register_task(self, task_id: str, task_fn: Callable, 
+                     task_data: Any, metrics: List[Dict], task_info: Dict = None):
+        """
+        Register a benchmark task.
+        
+        Args:
+            task_id: Unique identifier for the task
+            task_fn: Function that takes a model and data and returns predictions
+            task_data: Data to be used for the task
+            metrics: List of metric functions to evaluate performance
+            task_info: Additional information about the task
+        """
+        self.tasks[task_id] = {
+            "function": task_fn,
+            "data": task_data,
+            "metrics": metrics,
+            "info": task_info or {}
+        }
+    
+    def run_benchmark(self, model_ids: List[str] = None, task_ids: List[str] = None,
+                     repetitions: int = 1, verbose: bool = True) -> Dict:
+        """
+        Run the benchmark on specified models and tasks.
+        
+        Args:
+            model_ids: Models to benchmark (all if None)
+            task_ids: Tasks to run (all if None)
+            repetitions: Number of times to repeat each test
+            verbose: Whether to print progress
+        
+        Returns:
+            Dictionary of benchmark results
+        """
+        if model_ids is None:
+            model_ids = list(self.models.keys())
+        
+        if task_ids is None:
+            task_ids = list(self.tasks.keys())
+            
+        for model_id in model_ids:
+            if model_id not in self.models:
+                raise ValueError(f"Model '{model_id}' not registered")
+            
+            if verbose:
+                print(f"\nBenchmarking model: {model_id}")
+                
+            for task_id in task_ids:
+                if task_id not in self.tasks:
+                    raise ValueError(f"Task '{task_id}' not registered")
+                
+                if verbose:
+                    print(f"  Running task: {task_id}")
+                
+                model = self.models[model_id]["instance"]
+                task = self.tasks[task_id]
+                
+                # Initialize result storage for this model-task pair
+                if task_id not in self.results[model_id]:
+                    self.results[model_id][task_id] = {
+                        "metrics": {},
+                        "runtime": [],
+                        "repetitions": repetitions
+                    }
+                
+                # Run the task multiple times for stability
+                for rep in range(repetitions):
+                    if verbose and repetitions > 1:
+                        print(f"    Repetition {rep+1}/{repetitions}")
+                        
+                    # Time the execution
+                    start_time = time.time()
+                    predictions = task["function"](model, task["data"])
+                    end_time = time.time()
+                    execution_time = end_time - start_time
+                    
+                    # Record runtime
+                    self.results[model_id][task_id]["runtime"].append(execution_time)
+                    
+                    # Calculate and store metrics
+                    for metric in task["metrics"]:
+                        metric_name = metric["name"]
+                        metric_fn = metric["function"]
+                        score = metric_fn(predictions, task["data"])
+                        
+                        if metric_name not in self.results[model_id][task_id]["metrics"]:
+                            self.results[model_id][task_id]["metrics"][metric_name] = []
+                            
+                        self.results[model_id][task_id]["metrics"][metric_name].append(score)
+                        
+                        if verbose:
+                            print(f"    {metric_name}: {score:.4f}")
+                    
+                    if verbose:
+                        print(f"    Runtime: {execution_time:.4f}s")
+                        
+        # Calculate aggregate statistics
+        self._calculate_aggregates()
+        
+        return self.results
+    
+    def _calculate_aggregates(self):
+        """Calculate aggregate statistics for all results."""
+        for model_id in self.results:
+            for task_id in self.results[model_id]:
+                result = self.results[model_id][task_id]
+                
+                # Calculate runtime statistics
+                result["avg_runtime"] = np.mean(result["runtime"])
+                result["std_runtime"] = np.std(result["runtime"])
+                
+                # Calculate metric statistics
+                for metric_name in result["metrics"]:
+                    scores = result["metrics"][metric_name]
+                    result["metrics"][metric_name + "_avg"] = np.mean(scores)
+                    result["metrics"][metric_name + "_std"] = np.std(scores)
+    
+    def save_results(self, output_dir: str = "benchmark_results"):
+        """Save benchmark results to disk."""
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # Create a results file with timestamp
+        filename = f"{output_dir}/{self.name.replace(' ', '_')}_{self.timestamp}.json"
+        
+        # Prepare serializable results
+        serializable_results = {}
+        for model_id, model_results in self.results.items():
+            serializable_results[model_id] = {
+                "info": self.models[model_id]["info"],
+                "tasks": {}
+            }
+            
+            for task_id, task_results in model_results.items():
+                serializable_results[model_id]["tasks"][task_id] = {
+                    "metrics": task_results["metrics"],
+                    "avg_runtime": task_results.get("avg_runtime", None),
+                    "std_runtime": task_results.get("std_runtime", None),
+                    "repetitions": task_results["repetitions"]
+                }
+        
+        # Save as JSON
+        with open(filename, 'w') as f:
+            json.dump({
+                "benchmark_name": self.name,
+                "timestamp": self.timestamp,
+                "results": serializable_results
+            }, f, indent=2)
+            
+        return filename
+    
+    def generate_report(self, output_dir: str = "benchmark_reports", format: str = "html"):
+        """Generate a visual report of benchmark results."""
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # Create a pandas DataFrame for easier analysis
+        rows = []
+        for model_id in self.results:
+            for task_id in self.results[model_id]:
+                result = self.results[model_id][task_id]
+                
+                row = {
+                    "Model": model_id,
+                    "Task": task_id,
+                    "Avg Runtime (s)": result.get("avg_runtime", 0)
+                }
+                
+                # Add metrics
+                for metric_name in result["metrics"]:
+                    if metric_name.endswith("_avg") or metric_name.endswith("_std"):
+                        continue
+                    row[f"{metric_name} (avg)"] = result["metrics"].get(f"{metric_name}_avg", 
+                                                                       np.mean(result["metrics"][metric_name]))
+                
+                rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        
+        # Generate plots
+        self._generate_plots(df, output_dir)
+        
+        # Generate HTML report
+        if format.lower() == "html":
+            html_path = f"{output_dir}/{self.name.replace(' ', '_')}_{self.timestamp}.html"
+            with open(html_path, 'w') as f:
+                f.write("<html><head>")
+                f.write(f"<title>{self.name} Benchmark Report</title>")
+                f.write("<style>body{font-family:Arial;margin:20px} table{border-collapse:collapse;width:100%}")
+                f.write("th,td{text-align:left;padding:8px;border:1px solid #ddd}")
+                f.write("th{background-color:#f2f2f2} tr:nth-child(even){background-color:#f9f9f9}")
+                f.write("</style></head><body>")
+                f.write(f"<h1>{self.name} Benchmark Report</h1>")
+                f.write(f"<p>Generated on: {self.timestamp}</p>")
+                
+                # Summary table
+                f.write("<h2>Summary Results</h2>")
+                f.write(df.to_html(index=False))
+                
+                # Images
+                f.write("<h2>Performance Visualizations</h2>")
+                for img_file in os.listdir(output_dir):
+                    if img_file.endswith(".png") and self.timestamp in img_file:
+                        f.write(f"<div><img src='{img_file}' style='max-width:100%'></div>")
+                
+                f.write("</body></html>")
+            
+            return html_path
+        
+        return None
+    
+    def _generate_plots(self, df: pd.DataFrame, output_dir: str):
+        """Generate visualization plots for the benchmark results."""
+        # Runtime comparison
+        plt.figure(figsize=(10, 6))
+        runtime_data = df.pivot(index="Model", columns="Task", values="Avg Runtime (s)")
+        runtime_data.plot(kind="bar")
+        plt.title("Average Runtime by Model and Task")
+        plt.ylabel("Runtime (seconds)")
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/runtime_comparison_{self.timestamp}.png")
+        
+        # Metric comparisons
+        metric_cols = [col for col in df.columns if "(avg)" in col]
+        for metric in metric_cols:
+            plt.figure(figsize=(10, 6))
+            metric_data = df.pivot(index="Model", columns="Task", values=metric)
+            metric_data.plot(kind="bar")
+            plt.title(f"{metric} by Model and Task")
+            plt.ylabel(metric)
+            plt.tight_layout()
+            plt.savefig(f"{output_dir}/{metric.replace(' ', '_').replace('(', '').replace(')', '')}_{self.timestamp}.png")
+            
+        # Combined performance plot (if multiple metrics)
+        if len(metric_cols) > 1:
+            # Normalize metrics to 0-1 range for fair comparison
+            normalized_df = df.copy()
+            for metric in metric_cols:
+                min_val = df[metric].min()
+                max_val = df[metric].max()
+                if max_val > min_val:
+                    normalized_df[metric] = (df[metric] - min_val) / (max_val - min_val)
+                else:
+                    normalized_df[metric] = 0
+            
+            # Plot radar chart for each model (if matplotlib supports it)
+            try:
+                models = normalized_df["Model"].unique()
+                tasks = normalized_df["Task"].unique()
+                
+                for task in tasks:
+                    task_df = normalized_df[normalized_df["Task"] == task]
+                    
+                    # Setup radar chart
+                    labels = [m.replace(" (avg)", "") for m in metric_cols]
+                    num_metrics = len(labels)
+                    angles = np.linspace(0, 2*np.pi, num_metrics, endpoint=False).tolist()
+                    angles += angles[:1]  # Close the loop
+                    
+                    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
+                    
+                    for model in models:
+                        model_data = task_df[task_df["Model"] == model]
+                        values = [model_data[m].values[0] for m in metric_cols]
+                        values += values[:1]  # Close the loop
+                        
+                        ax.plot(angles, values, linewidth=1, label=model)
+                        ax.fill(angles, values, alpha=0.1)
+                    
+                    ax.set_thetagrids(np.degrees(angles[:-1]), labels)
+                    ax.set_ylim(0, 1.0)
+                    ax.set_title(f"Performance Profile for Task: {task}")
+                    ax.grid(True)
+                    plt.legend(loc="upper right")
+                    plt.tight_layout()
+                    plt.savefig(f"{output_dir}/radar_chart_{task}_{self.timestamp}.png")
+            except Exception as e:
+                print(f"Could not generate radar charts: {e}")
+
+
+# Example usage functions
+def example_metric_accuracy(predictions, data):
+    """Example accuracy metric function."""
+    true_labels = data.get("labels", [])
+    if len(predictions) != len(true_labels):
+        return 0.0
+    correct = sum(1 for pred, true in zip(predictions, true_labels) if pred == true)
+    return correct / len(true_labels) if len(true_labels) > 0 else 0.0
+
+def example_task_fn(model, data):
+    """Example task function that runs a model on data."""
+    # This would normally call model.predict() or similar
+    # For demonstration, we'll simulate predictions
+    inputs = data.get("inputs", [])
+    if hasattr(model, "predict"):
+        return model.predict(inputs)
+    else:
+        # Simulate predictions
+        return [0] * len(inputs)
+
+
+# Example classifier model
+class DummyClassifier:
+    def __init__(self, name="Dummy", accuracy=0.7):
+        self.name = name
+        self.accuracy = accuracy
+        
+    def predict(self, inputs):
+        # Simulate predictions with the configured accuracy
+        np.random.seed(42)  # For reproducibility
+        return [1 if np.random.random() < self.accuracy else 0 for _ in inputs]
+
+
+# Example of how to use the benchmark framework
+def run_example_benchmark():
+    # Create benchmark instance
+    benchmark = AIBenchmark("AI Model Comparison")
+    
+    # Register models
+    benchmark.register_model("model_a", DummyClassifier("Model A", 0.7), 
+                            {"type": "classifier", "version": "1.0"})
+    benchmark.register_model("model_b", DummyClassifier("Model B", 0.8), 
+                            {"type": "classifier", "version": "2.0"})
+    
+    # Create test data
+    test_data = {
+        "inputs": list(range(100)),
+        "labels": [i % 2 for i in range(100)]  # Binary labels 0/1
+    }
+    
+    # Register tasks
+    benchmark.register_task(
+        "classification", 
+        example_task_fn, 
+        test_data,
+        [{"name": "accuracy", "function": example_metric_accuracy}],
+        {"description": "Binary classification task"}
+    )
+    
+    # Run the benchmark
+    results = benchmark.run_benchmark(repetitions=3)
+    
+    # Save results and generate report
+    benchmark.save_results()
+    report_path = benchmark.generate_report()
+    
+    print(f"Benchmark completed. Report saved to: {report_path}")
+    
+    return benchmark
+
+
+if __name__ == "__main__":
+    run_example_benchmark()
